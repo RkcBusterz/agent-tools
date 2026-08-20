@@ -25,7 +25,7 @@ class McpKit {
         return this.tools.get(name);
     }
 
-        execute(name, args) {
+    execute(name, args) {
         let tool = this.tools.get(name);
         if (!tool && name.includes('.')) {
             const actualName = name.split('.').pop();
@@ -69,7 +69,7 @@ class McpKit {
         const filtered = category ? toolsArray.filter(t => t.category === category) : toolsArray;
         return filtered.map(t => `${t.category}.${t.name}`).join('\n');
     }
-        search(query) {
+    search(query) {
         if (!query) {
             return null;
         }
@@ -137,74 +137,124 @@ class McpKit {
 
 }
 
-const prompt = async (kit, userPrompt, call, maxIterations = 10) => {
-    const systemInstruction = `You are a strict tool execution agent. You MUST respond ONLY with a single command starting with one of these exact prefixes:
-- SEARCH: <keywords>
-- LIST_CATEGORIES
-- LIST_TOOLS: <category>
-- EXECUTE: <toolName> | [<arg1>, <arg2>, ...]
-- FINAL_ANSWER: <your response>
+const prompt = async (kit, userPrompt, call, options = {}) => {
+    const maxIterations = typeof options === 'number' ? options : (options.maxIterations || 10);
+    const debug = typeof options === 'object' && options.debug === true;
+    const stream = typeof options === 'object' && (options.stream === true || typeof options.onToken === 'function' || typeof options.onChunk === 'function');
+    const onToken = typeof options === 'object' && (options.onToken || options.onChunk);
 
-For EXECUTE, provide argument values directly as a JSON array (e.g. EXECUTE: math.add | [25, 75]). Do NOT use parameter object names like {"a": 25, "b": 75}.
+    const emitToken = (token) => {
+        if (onToken) {
+            onToken(token);
+        } else if (stream) {
+            process.stdout.write(token);
+        }
+    };
 
-Do not include conversational text or markdown formatting unless using FINAL_ANSWER.
+    const systemInstruction = `Available commands:
+- search("keywords")
+- list_categories()
+- list_tools("category")
+- <toolName>(args) or <category>.<toolName>(args)
+- answer("your final response")
 
+RULES:
+- Call tools directly by name (e.g., github.listRepositories() or add([25, 75])).
+- If no tool is needed or task is complete, provide your answer directly or via answer("...").
+- Reply with EXACTLY ONE command or answer per turn.
+- No need to add anything like <|tool_start_call|> <toolcall> {Json tool call} only write the tool call directly 
+- use search tool with more priority, if it gives no tool or incorrect tool then switch to list tools and list categories 
 Task: ${userPrompt}`;
 
     const history = [];
     history.push({ role: 'user', parts: [{ text: systemInstruction }] });
 
-        for (let i = 0; i < maxIterations; i++) {
-        console.log(`\n================ STEP ${i} SENT TO AI ================`);
-        const lastMessage = history[history.length - 1];
-        console.log(lastMessage.parts[0].text);
+    const debugLogs = [];
 
-        const response = await call(history);
-        const text = String(response).trim();
+    for (let i = 0; i < maxIterations; i++) {
+        let turnTokens = [];
+        const response = await call(history, (token) => {
+            turnTokens.push(token);
+        });
 
-        console.log(`---------------- STEP ${i} AI RESPONSE ----------------`);
-        console.log(text);
-
+        let text = String(response).trim();
         history.push({ role: 'model', parts: [{ text }] });
 
-        if (text.startsWith('FINAL_ANSWER:')) {
-            return text.replace('FINAL_ANSWER:', '').trim();
+        const stepLog = { step: i, rawResponse: text };
+        text = text.replace(/<\|tool_call_start\|>\[?/g, '').replace(/\]?<\|tool_call_end\|>/g, '').trim();
+
+        if (text.startsWith('answer(')) {
+            const match = text.match(/^answer\((?:['"`])?([\s\S]*?)(?:['"`])?\)$/);
+            const finalAnswer = match ? match[1] : text.slice(7, -1);
+            emitToken(finalAnswer);
+            if (debug) {
+                stepLog.finalAnswer = finalAnswer;
+                debugLogs.push(stepLog);
+                return { result: finalAnswer, iterations: i + 1, steps: debugLogs };
+            }
+            return { result: finalAnswer, iterations: i + 1 };
         }
 
         let resultText = '';
-        if (text.startsWith('SEARCH:')) {
-            const query = text.replace('SEARCH:', '').trim();
-            const result = kit.search(query);
-            resultText = `SEARCH_RESULT: ${JSON.stringify(result || 'No tool found')}`;
-        } else if (text.startsWith('LIST_CATEGORIES')) {
-            const categories = kit.listCategoriesAI();
-            resultText = `CATEGORIES_RESULT: ${categories}`;
-        } else if (text.startsWith('LIST_TOOLS:')) {
-            const category = text.replace('LIST_TOOLS:', '').trim();
-            const tools = kit.listToolsAi(category);
-            resultText = `TOOLS_RESULT:\n${tools}`;
-        } else if (text.startsWith('EXECUTE:')) {
-            const parts = text.replace('EXECUTE:', '').split('|');
-            const toolName = parts[0].trim();
-            const rawArgs = parts[1] ? parts[1].trim() : '[]';
+        try {
+            if (text.includes('list_categories')) {
+                resultText = `CATEGORIES: ${kit.listCategoriesAI()}`;
+            } else if (text.startsWith('list_tools')) {
+                const match = text.match(/list_tools\(['"]?([^'"]+)['"]?\)/);
+                const category = match ? match[1] : '';
+                resultText = `TOOLS:\n${kit.listToolsAi(category)}`;
+            } else if (text.startsWith('search')) {
+                const match = text.match(/search\(['"]?([^'"]+)['"]?\)/);
+                const query = match ? match[1] : '';
+                const res = kit.search(query);
+                resultText = `SEARCH_RESULT: ${JSON.stringify(res || 'No tool found')}`;
+            } else if (text.startsWith('execute')) {
+                const inner = text.slice(text.indexOf('(') + 1, text.lastIndexOf(')')).trim();
+                const parts = inner.split(/,(.+)/);
+                let rawName = parts[0] ? parts[0].trim() : '';
+                let rawArgs = parts[1] ? parts[1].trim() : '{}';
 
-            try {
-                const parsedArgs = JSON.parse(rawArgs);
-                const result = kit.execute(toolName, parsedArgs);
-                resultText = `EXECUTION_RESULT: ${JSON.stringify(result)}`;
-            } catch (err) {
-                resultText = `EXECUTION_ERROR: ${err.message}`;
+                let toolName = rawName.replace(/^(?:toolName|name|action)\s*=\s*/i, '').replace(/^['"]|['"]$/g, '').trim();
+
+                let args = {};
+                if (rawArgs) {
+                    try {
+                        args = JSON.parse(rawArgs.replace(/'/g, '"'));
+                    } catch (e) {}
+                }
+
+                const res = kit.execute(toolName, args);
+                resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
+            } else if ((text.includes('.') || kit.get(text.split('(')[0])) && text.includes('(')) {
+                const parts = text.split('(');
+                const toolName = parts[0].replace(/^['"]|['"]$/g, '').trim();
+                const rawArgs = parts[1] ? parts[1].replace(/\)$/, '').trim() : '{}';
+                let args = {};
+                try {
+                    args = JSON.parse(rawArgs.replace(/'/g, '"'));
+                } catch (e) {}
+                const res = kit.execute(toolName, args);
+                resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
+            } else {
+                emitToken(text);
+                if (debug) {
+                    stepLog.finalAnswer = text;
+                    debugLogs.push(stepLog);
+                    return { result: text, iterations: i + 1, steps: debugLogs };
+                }
+                return { result: text, iterations: i + 1 };
             }
-        } else {
-            resultText = `ERROR: Your output did not start with a valid command prefix. You MUST reply using one of: SEARCH:, LIST_CATEGORIES, LIST_TOOLS:, EXECUTE:, or FINAL_ANSWER:.`;
+        } catch (err) {
+            resultText = `ERROR: ${err.message}`;
         }
 
+        stepLog.actionResult = resultText;
+        debugLogs.push(stepLog);
         history.push({ role: 'user', parts: [{ text: resultText }] });
     }
 
-    throw new Error('Max iterations reached without FINAL_ANSWER');
+    throw new Error('Max iterations reached');
 };
-
 
 
 module.exports = { McpKit, prompt };
