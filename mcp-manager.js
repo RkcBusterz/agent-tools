@@ -25,7 +25,7 @@ class McpKit {
         return this.tools.get(name);
     }
 
-    execute(name, args) {
+    async execute(name, args) {
         let tool = this.tools.get(name);
         if (!tool && name.includes('.')) {
             const actualName = name.split('.').pop();
@@ -35,21 +35,25 @@ class McpKit {
             throw new Error(`Tool "${name}" not found`);
         }
 
-        if (Array.isArray(args)) {
-            try {
-                return tool.fn(args);
-            } catch (err) {
-                return tool.fn(...args);
+        try {
+            if (Array.isArray(args)) {
+                try {
+                    return await tool.fn(args);
+                } catch (err) {
+                    return await tool.fn(...args);
+                }
             }
-        }
-        if (typeof args === 'object' && args !== null) {
-            try {
-                return tool.fn(args);
-            } catch (err) {
-                return tool.fn(...Object.values(args));
+            if (typeof args === 'object' && args !== null) {
+                try {
+                    return await tool.fn(args);
+                } catch (err) {
+                    return await tool.fn(...Object.values(args));
+                }
             }
+            return await tool.fn(args);
+        } catch (err) {
+            throw new Error(`Execution error in tool "${tool.name}": ${err.message}`);
         }
-        return tool.fn(args);
     }
 
 
@@ -223,7 +227,7 @@ Task: ${userPrompt}`;
                     } catch (e) {}
                 }
 
-                const res = kit.execute(toolName, args);
+                const res = await kit.execute(toolName, args);
                 resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
             } else if ((text.includes('.') || kit.get(text.split('(')[0])) && text.includes('(')) {
                 const parts = text.split('(');
@@ -233,7 +237,7 @@ Task: ${userPrompt}`;
                 try {
                     args = JSON.parse(rawArgs.replace(/'/g, '"'));
                 } catch (e) {}
-                const res = kit.execute(toolName, args);
+                const res = await kit.execute(toolName, args);
                 resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
             } else {
                 emitToken(text);
