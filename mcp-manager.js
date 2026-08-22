@@ -141,6 +141,23 @@ class McpKit {
 
 }
 
+function parseJsonResponse(text) {
+    let cleaned = String(text).trim();
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+    try {
+        return JSON.parse(cleaned);
+    } catch (e) {
+        const match = cleaned.match(/\{[\s\S]*\}/);
+        if (match) {
+            try {
+                return JSON.parse(match[0]);
+            } catch (err) {}
+        }
+        return null;
+    }
+}
+
 const prompt = async (kit, userPrompt, call, options = {}) => {
     const maxIterations = typeof options === 'number' ? options : (options.maxIterations || 10);
     const debug = typeof options === 'object' && options.debug === true;
@@ -155,19 +172,31 @@ const prompt = async (kit, userPrompt, call, options = {}) => {
         }
     };
 
-    const systemInstruction = `Available commands:
-- search("keywords")
-- list_categories()
-- list_tools("category")
-- <toolName>(args) or <category>.<toolName>(args)
-- answer("your final response")
+    const systemInstruction = `You are an AI assistant operating via JSON tool execution. Always respond with EXACTLY ONE valid JSON object in one of the following formats:
+
+1. Search tools:
+{"action": "search", "query": "keywords to search"}
+
+2. List categories:
+{"action": "list_categories"}
+
+3. List tools in a category:
+{"action": "list_tools", "category": "category_name"}
+
+4. Execute a tool:
+{"action": "execute", "name": "tool_name", "args": { "param": "value" }}
+
+5. Final answer:
+{"action": "answer", "content": "your final response here"}
 
 RULES:
-- Call tools directly by name (e.g., github.listRepositories() or add([25, 75])).
-- If no tool is needed or task is complete, provide your answer directly or via answer("...").
-- Reply with EXACTLY ONE command or answer per turn.
-- No need to add anything like <|tool_start_call|> <toolcall> {Json tool call} only write the tool call directly 
-- use search tool with more priority, if it gives no tool or incorrect tool then switch to list tools and list categories 
+- Respond strictly with valid JSON.
+- Start by using "search" to look for tools relevant to the user request.
+- After receiving search results, analyze whether the tool returned is useful for the task:
+  a. If the tool IS useful: execute it immediately using "execute". Use empty args {} if parameters are optional or have defaults.
+  b. If the tool IS NOT useful or no tool was found: use "list_categories" and "list_tools" to explore categories and find the right tool.
+- Only return "answer" after executing the necessary tools and getting execution results, or if no tool exists for the task.
+
 Task: ${userPrompt}`;
 
     const history = [];
@@ -185,76 +214,63 @@ Task: ${userPrompt}`;
         history.push({ role: 'model', parts: [{ text }] });
 
         const stepLog = { step: i, rawResponse: text };
-        text = text.replace(/<\|tool_call_start\|>\[?/g, '').replace(/\]?<\|tool_call_end\|>/g, '').trim();
+        const parsed = parseJsonResponse(text);
 
-        if (text.startsWith('answer(')) {
-            const match = text.match(/^answer\((?:['"`])?([\s\S]*?)(?:['"`])?\)$/);
-            const finalAnswer = match ? match[1] : text.slice(7, -1);
-            emitToken(finalAnswer);
-            if (debug) {
-                stepLog.finalAnswer = finalAnswer;
-                debugLogs.push(stepLog);
-                return { result: finalAnswer, iterations: i + 1, steps: debugLogs };
-            }
-            return { result: finalAnswer, iterations: i + 1 };
-        }
+        if (parsed && typeof parsed === 'object') {
+            const action = parsed.action || (parsed.name ? 'execute' : null);
 
-        let resultText = '';
-        try {
-            if (text.includes('list_categories')) {
-                resultText = `CATEGORIES: ${kit.listCategoriesAI()}`;
-            } else if (text.startsWith('list_tools')) {
-                const match = text.match(/list_tools\(['"]?([^'"]+)['"]?\)/);
-                const category = match ? match[1] : '';
-                resultText = `TOOLS:\n${kit.listToolsAi(category)}`;
-            } else if (text.startsWith('search')) {
-                const match = text.match(/search\(['"]?([^'"]+)['"]?\)/);
-                const query = match ? match[1] : '';
-                const res = kit.search(query);
-                resultText = `SEARCH_RESULT: ${JSON.stringify(res || 'No tool found')}`;
-            } else if (text.startsWith('execute')) {
-                const inner = text.slice(text.indexOf('(') + 1, text.lastIndexOf(')')).trim();
-                const parts = inner.split(/,(.+)/);
-                let rawName = parts[0] ? parts[0].trim() : '';
-                let rawArgs = parts[1] ? parts[1].trim() : '{}';
-
-                let toolName = rawName.replace(/^(?:toolName|name|action)\s*=\s*/i, '').replace(/^['"]|['"]$/g, '').trim();
-
-                let args = {};
-                if (rawArgs) {
-                    try {
-                        args = JSON.parse(rawArgs.replace(/'/g, '"'));
-                    } catch (e) {}
-                }
-
-                const res = await kit.execute(toolName, args);
-                resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
-            } else if ((text.includes('.') || kit.get(text.split('(')[0])) && text.includes('(')) {
-                const parts = text.split('(');
-                const toolName = parts[0].replace(/^['"]|['"]$/g, '').trim();
-                const rawArgs = parts[1] ? parts[1].replace(/\)$/, '').trim() : '{}';
-                let args = {};
-                try {
-                    args = JSON.parse(rawArgs.replace(/'/g, '"'));
-                } catch (e) {}
-                const res = await kit.execute(toolName, args);
-                resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
-            } else {
-                emitToken(text);
+            if (action === 'answer') {
+                const finalAnswer = parsed.content || parsed.result || text;
+                emitToken(finalAnswer);
                 if (debug) {
-                    stepLog.finalAnswer = text;
+                    stepLog.finalAnswer = finalAnswer;
                     debugLogs.push(stepLog);
-                    return { result: text, iterations: i + 1, steps: debugLogs };
+                    return { result: finalAnswer, iterations: i + 1, steps: debugLogs };
                 }
-                return { result: text, iterations: i + 1 };
+                return { result: finalAnswer, iterations: i + 1 };
             }
-        } catch (err) {
-            resultText = `ERROR: ${err.message}`;
-        }
 
-        stepLog.actionResult = resultText;
-        debugLogs.push(stepLog);
-        history.push({ role: 'user', parts: [{ text: resultText }] });
+            let resultText = '';
+            try {
+                if (action === 'search') {
+                    const query = parsed.query || parsed.keywords || '';
+                    const res = kit.search(query);
+                    resultText = `SEARCH_RESULT: ${JSON.stringify(res || 'No tool found')}`;
+                } else if (action === 'list_categories') {
+                    resultText = `CATEGORIES: ${kit.listCategoriesAI()}`;
+                } else if (action === 'list_tools') {
+                    const category = parsed.category || '';
+                    resultText = `TOOLS:\n${kit.listToolsAi(category)}`;
+                } else if (action === 'execute' || kit.get(action) || kit.get(parsed.name)) {
+                    const toolName = parsed.name || action;
+                    const args = parsed.args !== undefined ? parsed.args : {};
+                    const res = await kit.execute(toolName, args);
+                    resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
+                } else {
+                    emitToken(text);
+                    if (debug) {
+                        stepLog.finalAnswer = text;
+                        debugLogs.push(stepLog);
+                        return { result: text, iterations: i + 1, steps: debugLogs };
+                    }
+                    return { result: text, iterations: i + 1 };
+                }
+            } catch (err) {
+                resultText = `ERROR: ${err.message}`;
+            }
+
+            stepLog.actionResult = resultText;
+            debugLogs.push(stepLog);
+            history.push({ role: 'user', parts: [{ text: resultText }] });
+        } else {
+            emitToken(text);
+            if (debug) {
+                stepLog.finalAnswer = text;
+                debugLogs.push(stepLog);
+                return { result: text, iterations: i + 1, steps: debugLogs };
+            }
+            return { result: text, iterations: i + 1 };
+        }
     }
 
     throw new Error('Max iterations reached');
