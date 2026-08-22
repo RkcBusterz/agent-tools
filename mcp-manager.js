@@ -1,3 +1,5 @@
+const { MemoryContext, FileContext } = require('./context_manager.js');
+
 class McpKit {
     constructor() {
         this.tools = new Map();
@@ -152,10 +154,50 @@ function parseJsonResponse(text) {
         if (match) {
             try {
                 return JSON.parse(match[0]);
-            } catch (err) {}
+            } catch (err) { }
         }
         return null;
     }
+}
+
+function resolveContextHelper(options) {
+    if (!options || typeof options !== 'object') return { text: '', instance: null, target: null };
+    const limit = typeof options.contextLimit === 'number' ? options.contextLimit : (typeof options.limit === 'number' ? options.limit : null);
+
+    let instance = null;
+    let target = null;
+    let text = '';
+
+    if (options.contextManager && typeof options.contextManager.getForAi === 'function') {
+        instance = options.contextManager;
+        target = options.contextId || options.contextFile || options.contextPath || options.context || options.file || options.id;
+    } else if (options.context && typeof options.context.getForAi === 'function') {
+        instance = options.context;
+        target = options.contextId || options.contextFile || options.contextPath || options.id || options.file;
+    } else if (typeof options.context === 'string') {
+        target = options.context;
+        if (options.context.endsWith('.json') || options.context.includes('/') || options.context.includes('\\')) {
+            instance = new FileContext();
+        } else {
+            instance = new MemoryContext();
+        }
+    } else if (options.contextFile || options.contextPath) {
+        instance = new FileContext();
+        target = options.contextFile || options.contextPath;
+    } else if (options.contextId) {
+        instance = new MemoryContext();
+        target = options.contextId;
+    }
+
+    if (instance && target && typeof instance.getForAi === 'function') {
+        try {
+            text = instance.getForAi(target, limit);
+        } catch (e) { }
+    } else if (typeof options.context === 'string') {
+        text = options.context;
+    }
+
+    return { text, instance, target };
 }
 
 const prompt = async (kit, userPrompt, call, options = {}) => {
@@ -172,30 +214,50 @@ const prompt = async (kit, userPrompt, call, options = {}) => {
         }
     };
 
+    const { text: contextText, instance: ctxInstance, target: ctxTarget } = resolveContextHelper(options);
+    const autoSave = options.autoSave !== false;
+
+    if (autoSave && ctxInstance && ctxTarget && typeof ctxInstance.add === 'function') {
+        try {
+            ctxInstance.add(ctxTarget, 'user', userPrompt);
+        } catch (err) { }
+    }
+
+    const saveAssistantMessage = (msg) => {
+        if (autoSave && ctxInstance && ctxTarget && typeof ctxInstance.add === 'function') {
+            try {
+                ctxInstance.add(ctxTarget, 'assistant', msg);
+            } catch (err) { }
+        }
+    };
+
+    const contextHeader = contextText ? `\n\nCONVERSATION CONTEXT:\n${contextText}` : '';
+
     const systemInstruction = `You are an AI assistant operating via JSON tool execution. Always respond with EXACTLY ONE valid JSON object in one of the following formats:
 
 1. Search tools:
-{"action": "search", "query": "keywords to search"}
+{"action": "search", "query": "keywords to search", "requiresContext": true}
 
 2. List categories:
-{"action": "list_categories"}
+{"action": "list_categories", "requiresContext": true}
 
 3. List tools in a category:
-{"action": "list_tools", "category": "category_name"}
+{"action": "list_tools", "category": "category_name", "requiresContext": true}
 
 4. Execute a tool:
-{"action": "execute", "name": "tool_name", "args": { "param": "value" }}
+{"action": "execute", "name": "tool_name", "args": { "param": "value" }, "requiresContext": false}
 
 5. Final answer:
-{"action": "answer", "content": "your final response here"}
+{"action": "answer", "content": "your final response here", "requiresContext": false}
 
 RULES:
 - Respond strictly with valid JSON.
+- Include "requiresContext": true or false in your JSON output. Set "requiresContext": false if you have extracted all needed details from CONVERSATION CONTEXT or if past context is no longer needed for subsequent steps.
 - Start by using "search" to look for tools relevant to the user request.
 - After receiving search results, analyze whether the tool returned is useful for the task:
   a. If the tool IS useful: execute it immediately using "execute". Use empty args {} if parameters are optional or have defaults.
   b. If the tool IS NOT useful or no tool was found: use "list_categories" and "list_tools" to explore categories and find the right tool.
-- Only return "answer" after executing the necessary tools and getting execution results, or if no tool exists for the task.
+- Only return "answer" after executing the necessary tools and getting execution results, or if no tool exists for the task.${contextHeader}
 
 Task: ${userPrompt}`;
 
@@ -217,10 +279,14 @@ Task: ${userPrompt}`;
         const parsed = parseJsonResponse(text);
 
         if (parsed && typeof parsed === 'object') {
+            if (parsed.requiresContext === false && history[0] && history[0].parts && history[0].parts[0]) {
+                history[0].parts[0].text = history[0].parts[0].text.replace(/\n\nCONVERSATION CONTEXT:[\s\S]*?(?=\n\nTask:)/, '');
+            }
             const action = parsed.action || (parsed.name ? 'execute' : null);
 
             if (action === 'answer') {
                 const finalAnswer = parsed.content || parsed.result || text;
+                saveAssistantMessage(finalAnswer);
                 emitToken(finalAnswer);
                 if (debug) {
                     stepLog.finalAnswer = finalAnswer;
@@ -243,10 +309,11 @@ Task: ${userPrompt}`;
                     resultText = `TOOLS:\n${kit.listToolsAi(category)}`;
                 } else if (action === 'execute' || kit.get(action) || kit.get(parsed.name)) {
                     const toolName = parsed.name || action;
-                    const args = parsed.args !== undefined ? parsed.args : {};
+                    const args = parsed.args !== undefined ? parsed.args : (parsed[""] !== undefined ? parsed[""] : {});
                     const res = await kit.execute(toolName, args);
                     resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
                 } else {
+                    saveAssistantMessage(text);
                     emitToken(text);
                     if (debug) {
                         stepLog.finalAnswer = text;
@@ -263,6 +330,7 @@ Task: ${userPrompt}`;
             debugLogs.push(stepLog);
             history.push({ role: 'user', parts: [{ text: resultText }] });
         } else {
+            saveAssistantMessage(text);
             emitToken(text);
             if (debug) {
                 stepLog.finalAnswer = text;
