@@ -1,4 +1,5 @@
 const { MemoryContext, FileContext } = require('./context_manager.js');
+const { LlmRouter } = require('./router.js');
 
 class McpKit {
     constructor() {
@@ -160,7 +161,7 @@ function parseJsonResponse(text) {
     }
 }
 
-function resolveContextHelper(options) {
+async function resolveContextHelper(options) {
     if (!options || typeof options !== 'object') return { text: '', instance: null, target: null };
     const limit = typeof options.contextLimit === 'number' ? options.contextLimit : (typeof options.limit === 'number' ? options.limit : null);
 
@@ -191,7 +192,7 @@ function resolveContextHelper(options) {
 
     if (instance && target && typeof instance.getForAi === 'function') {
         try {
-            text = instance.getForAi(target, limit);
+            text = await instance.getForAi(target, limit);
         } catch (e) { }
     } else if (typeof options.context === 'string') {
         text = options.context;
@@ -201,6 +202,9 @@ function resolveContextHelper(options) {
 }
 
 const prompt = async (kit, userPrompt, call, options = {}) => {
+    const promptStartTime = Date.now();
+    let timeToFirstStepMs = null;
+
     const maxIterations = typeof options === 'number' ? options : (options.maxIterations || 10);
     const debug = typeof options === 'object' && options.debug === true;
     const stream = typeof options === 'object' && (options.stream === true || typeof options.onToken === 'function' || typeof options.onChunk === 'function');
@@ -214,26 +218,26 @@ const prompt = async (kit, userPrompt, call, options = {}) => {
         }
     };
 
-    const { text: contextText, instance: ctxInstance, target: ctxTarget } = resolveContextHelper(options);
+    const { text: contextText, instance: ctxInstance, target: ctxTarget } = await resolveContextHelper(options);
     const autoSave = options.autoSave !== false;
 
     if (autoSave && ctxInstance && ctxTarget && typeof ctxInstance.add === 'function') {
         try {
-            ctxInstance.add(ctxTarget, 'user', userPrompt);
+            await ctxInstance.add(ctxTarget, 'user', userPrompt);
         } catch (err) { }
     }
 
-    const saveAssistantMessage = (msg) => {
+    const saveAssistantMessage = async (msg) => {
         if (autoSave && ctxInstance && ctxTarget && typeof ctxInstance.add === 'function') {
             try {
-                ctxInstance.add(ctxTarget, 'assistant', msg);
+                await ctxInstance.add(ctxTarget, 'AI Model(You)', msg);
             } catch (err) { }
         }
     };
 
     const contextHeader = contextText ? `\n\nCONVERSATION CONTEXT:\n${contextText}` : '';
 
-    const systemInstruction = `You are an AI assistant operating via JSON tool execution. Always respond with EXACTLY ONE valid JSON object in one of the following formats:
+    const systemInstruction = `You are an AI model operating via JSON tool execution. Always respond with EXACTLY ONE valid JSON object in one of the following formats:
 
 1. Search tools:
 {"action": "search", "query": "keywords to search", "requiresContext": true}
@@ -267,15 +271,21 @@ Task: ${userPrompt}`;
     const debugLogs = [];
 
     for (let i = 0; i < maxIterations; i++) {
+        const stepStartTime = Date.now();
         let turnTokens = [];
         const response = await call(history, (token) => {
             turnTokens.push(token);
         });
+        const stepDurationMs = Date.now() - stepStartTime;
+
+        if (i === 0) {
+            timeToFirstStepMs = Date.now() - promptStartTime;
+        }
 
         let text = String(response).trim();
         history.push({ role: 'model', parts: [{ text }] });
 
-        const stepLog = { step: i, rawResponse: text };
+        const stepLog = { step: i, rawResponse: text, durationMs: stepDurationMs };
         const parsed = parseJsonResponse(text);
 
         if (parsed && typeof parsed === 'object') {
@@ -286,12 +296,18 @@ Task: ${userPrompt}`;
 
             if (action === 'answer') {
                 const finalAnswer = parsed.content || parsed.result || text;
-                saveAssistantMessage(finalAnswer);
+                await saveAssistantMessage(finalAnswer);
                 emitToken(finalAnswer);
                 if (debug) {
                     stepLog.finalAnswer = finalAnswer;
                     debugLogs.push(stepLog);
-                    return { result: finalAnswer, iterations: i + 1, steps: debugLogs };
+                    return {
+                        result: finalAnswer,
+                        iterations: i + 1,
+                        totalDurationMs: Date.now() - promptStartTime,
+                        timeToFirstStepMs,
+                        steps: debugLogs
+                    };
                 }
                 return { result: finalAnswer, iterations: i + 1 };
             }
@@ -313,12 +329,18 @@ Task: ${userPrompt}`;
                     const res = await kit.execute(toolName, args);
                     resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
                 } else {
-                    saveAssistantMessage(text);
+                    await saveAssistantMessage(text);
                     emitToken(text);
                     if (debug) {
                         stepLog.finalAnswer = text;
                         debugLogs.push(stepLog);
-                        return { result: text, iterations: i + 1, steps: debugLogs };
+                        return {
+                            result: text,
+                            iterations: i + 1,
+                            totalDurationMs: Date.now() - promptStartTime,
+                            timeToFirstStepMs,
+                            steps: debugLogs
+                        };
                     }
                     return { result: text, iterations: i + 1 };
                 }
@@ -330,12 +352,18 @@ Task: ${userPrompt}`;
             debugLogs.push(stepLog);
             history.push({ role: 'user', parts: [{ text: resultText }] });
         } else {
-            saveAssistantMessage(text);
+            await saveAssistantMessage(text);
             emitToken(text);
             if (debug) {
                 stepLog.finalAnswer = text;
                 debugLogs.push(stepLog);
-                return { result: text, iterations: i + 1, steps: debugLogs };
+                return {
+                    result: text,
+                    iterations: i + 1,
+                    totalDurationMs: Date.now() - promptStartTime,
+                    timeToFirstStepMs,
+                    steps: debugLogs
+                };
             }
             return { result: text, iterations: i + 1 };
         }

@@ -6,7 +6,7 @@ class MemoryContext {
         this.contexts = new Map();
     }
 
-    add(id, user, message) {
+    async add(id, user, message) {
         const entry = {
             user,
             message,
@@ -21,7 +21,7 @@ class MemoryContext {
         return contextData;
     }
 
-    get(id, limit = null) {
+    async get(id, limit = null) {
         const contextData = this.contexts.get(id) || null;
         if (!contextData) {
             return null;
@@ -35,15 +35,15 @@ class MemoryContext {
         return contextData;
     }
 
-    getForAi(id, limit = null) {
-        const data = this.get(id, limit);
+    async getForAi(id, limit = null) {
+        const data = await this.get(id, limit);
         if (!data || !Array.isArray(data.messages) || data.messages.length === 0) {
             return '';
         }
         return data.messages.map(m => `${m.user}: ${m.message}`).join('\n');
     }
 
-    edit(id, messageIndex, updatedMessage) {
+    async edit(id, messageIndex, updatedMessage) {
         const contextData = this.contexts.get(id);
         if (!contextData) {
             throw new Error(`Context with id "${id}" not found in memory`);
@@ -56,7 +56,7 @@ class MemoryContext {
         return contextData;
     }
 
-    exportToFile(id, targetPath) {
+    async exportToFile(id, targetPath) {
         const contextData = this.contexts.get(id);
         if (!contextData) {
             throw new Error(`Context with id "${id}" not found in memory`);
@@ -64,9 +64,9 @@ class MemoryContext {
         const destination = path.resolve(process.cwd(), targetPath);
         const dir = path.dirname(destination);
         if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+            await fs.promises.mkdir(dir, { recursive: true });
         }
-        fs.writeFileSync(destination, JSON.stringify(contextData, null, 2), 'utf8');
+        await fs.promises.writeFile(destination, JSON.stringify(contextData, null, 2), 'utf8');
         return destination;
     }
 }
@@ -79,7 +79,7 @@ class FileContext {
         return path.resolve(process.cwd(), filePath);
     }
 
-    add(filePathInput, user, message, id = null) {
+    async add(filePathInput, user, message, id = null) {
         const filePath = this.resolvePath(filePathInput);
         if (!filePath) {
             throw new Error('Valid file path is required');
@@ -87,7 +87,7 @@ class FileContext {
 
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+            await fs.promises.mkdir(dir, { recursive: true });
         }
 
         const entry = {
@@ -100,7 +100,7 @@ class FileContext {
 
         if (fs.existsSync(filePath)) {
             try {
-                const content = fs.readFileSync(filePath, 'utf8');
+                const content = await fs.promises.readFile(filePath, 'utf8');
                 contextData = JSON.parse(content);
             } catch (err) {
                 contextData = { id: id || path.basename(filePath, '.json'), messages: [] };
@@ -108,11 +108,11 @@ class FileContext {
         }
 
         contextData.messages.push(entry);
-        fs.writeFileSync(filePath, JSON.stringify(contextData, null, 2), 'utf8');
+        await fs.promises.writeFile(filePath, JSON.stringify(contextData, null, 2), 'utf8');
         return contextData;
     }
 
-    get(param1, param2) {
+    async get(param1, param2) {
         let filePathInput = null;
         let limit = null;
 
@@ -130,7 +130,7 @@ class FileContext {
         }
 
         try {
-            const content = fs.readFileSync(filePath, 'utf8');
+            const content = await fs.promises.readFile(filePath, 'utf8');
             const contextData = JSON.parse(content);
 
             if (typeof limit === 'number' && limit > 0 && Array.isArray(contextData.messages)) {
@@ -145,21 +145,21 @@ class FileContext {
         }
     }
 
-    getForAi(param1, param2) {
-        const data = this.get(param1, param2);
+    async getForAi(param1, param2) {
+        const data = await this.get(param1, param2);
         if (!data || !Array.isArray(data.messages) || data.messages.length === 0) {
             return '';
         }
         return data.messages.map(m => `${m.user}: ${m.message}`).join('\n');
     }
 
-    edit(filePathInput, messageIndex, updatedMessage) {
+    async edit(filePathInput, messageIndex, updatedMessage) {
         const filePath = this.resolvePath(filePathInput);
         if (!filePath || !fs.existsSync(filePath)) {
             throw new Error(`Context file at "${filePathInput}" does not exist`);
         }
 
-        const content = fs.readFileSync(filePath, 'utf8');
+        const content = await fs.promises.readFile(filePath, 'utf8');
         const contextData = JSON.parse(content);
 
         if (messageIndex < 0 || messageIndex >= contextData.messages.length) {
@@ -169,7 +169,7 @@ class FileContext {
         contextData.messages[messageIndex].message = updatedMessage;
         contextData.messages[messageIndex].updatedAt = new Date().toISOString();
 
-        fs.writeFileSync(filePath, JSON.stringify(contextData, null, 2), 'utf8');
+        await fs.promises.writeFile(filePath, JSON.stringify(contextData, null, 2), 'utf8');
         return contextData;
     }
 }
