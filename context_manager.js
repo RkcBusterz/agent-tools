@@ -21,18 +21,23 @@ class MemoryContext {
         return contextData;
     }
 
-    async get(id, limit = null) {
+    async get(idOrOptions, limitParam = null) {
+        let id = idOrOptions;
+        let limit = limitParam;
+        if (typeof idOrOptions === 'object' && idOrOptions !== null) {
+            id = idOrOptions.id || idOrOptions.file || idOrOptions.path || null;
+            limit = typeof idOrOptions.limit === 'number' ? idOrOptions.limit : limitParam;
+        }
         const contextData = this.contexts.get(id) || null;
         if (!contextData) {
             return null;
         }
-        if (typeof limit === 'number' && limit > 0 && Array.isArray(contextData.messages)) {
-            return {
-                ...contextData,
-                messages: contextData.messages.slice(-limit)
-            };
-        }
-        return contextData;
+        const messages = Array.isArray(contextData.messages) ? contextData.messages : [];
+        const sliced = typeof limit === 'number' && limit > 0 ? messages.slice(-limit) : [...messages];
+        return {
+            id: contextData.id,
+            messages: sliced.map(m => ({ ...m }))
+        };
     }
 
     async getForAi(id, limit = null) {
@@ -103,7 +108,7 @@ class FileContext {
                 const content = await fs.promises.readFile(filePath, 'utf8');
                 contextData = JSON.parse(content);
             } catch (err) {
-                contextData = { id: id || path.basename(filePath, '.json'), messages: [] };
+                throw new Error(`Failed to parse context file at "${filePath}": ${err.message}`);
             }
         }
 

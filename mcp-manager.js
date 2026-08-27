@@ -39,19 +39,11 @@ class McpKit {
         }
 
         try {
-            if (Array.isArray(args)) {
-                try {
-                    return await tool.fn(args);
-                } catch (err) {
-                    return await tool.fn(...args);
-                }
+            if (typeof args === 'object' && args !== null && !Array.isArray(args)) {
+                return await tool.fn(args);
             }
-            if (typeof args === 'object' && args !== null) {
-                try {
-                    return await tool.fn(args);
-                } catch (err) {
-                    return await tool.fn(...Object.values(args));
-                }
+            if (Array.isArray(args)) {
+                return await tool.fn(...args);
             }
             return await tool.fn(args);
         } catch (err) {

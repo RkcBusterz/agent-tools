@@ -15,8 +15,10 @@ class LlmRouter {
 
     async call(input, onToken) {
         let lastError = null;
+        const total = this.providers.length;
 
-        for (let pIndex = 0; pIndex < this.providers.length; pIndex++) {
+        for (let offset = 0; offset < total; offset++) {
+            const pIndex = (this.activeProviderIndex + offset) % total;
             const provider = this.providers[pIndex];
             const callFn = typeof provider === 'function' ? provider : (provider.call || provider.fn);
 
@@ -38,7 +40,7 @@ class LlmRouter {
             }
         }
 
-        throw new Error(`LlmRouter failed across all ${this.providers.length} providers. Last error: ${lastError?.message}`);
+        throw new Error(`LlmRouter failed across all ${total} providers. Last error: ${lastError?.message}`);
     }
 
     getActiveProviderIndex() {

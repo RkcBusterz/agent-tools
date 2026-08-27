@@ -2,3 +2,4 @@
 ai_test.js
 mycontext.json
 contexts/
+embedding_model_test.js
