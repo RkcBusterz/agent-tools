@@ -1,3 +1,6 @@
+const fs = require('fs');
+const path = require('path');
+
 const chunkText = (text, minChar = 300, maxChar = 600) => {
     if (!text || typeof text !== 'string') {
         return [];
@@ -134,4 +137,141 @@ const retrieve = async (prompt, source, modelFn, options = {}) => {
     return await engine.retrieve({ prompt, source, modelFn, limit: options.limit, minChar: options.minChar, maxChar: options.maxChar });
 };
 
-module.exports = { Embedding, retrieve, chunkText, cosineSimilarity };
+const processVectorDimensions = (vectorInput, targetDimensions) => {
+    let vec = Array.from(vectorInput || []);
+    if (targetDimensions === 'raw' || targetDimensions === 'lossless' || !targetDimensions || targetDimensions <= 0) {
+        return vec;
+    }
+    if (typeof targetDimensions === 'number' && vec.length > targetDimensions) {
+        vec = vec.slice(0, targetDimensions);
+    }
+    let norm = 0;
+    for (let i = 0; i < vec.length; i++) {
+        norm += vec[i] * vec[i];
+    }
+    norm = Math.sqrt(norm);
+    if (norm > 0) {
+        for (let i = 0; i < vec.length; i++) {
+            vec[i] = vec[i] / norm;
+        }
+    }
+    return vec;
+};
+
+class VectorStore {
+    constructor(embedFn, nameOrOptions = 'default', options = {}) {
+        if (typeof nameOrOptions === 'object' && nameOrOptions !== null) {
+            this.name = nameOrOptions.name || 'default';
+            this.dimensions = nameOrOptions.dimensions !== undefined ? nameOrOptions.dimensions : 256;
+        } else {
+            this.name = nameOrOptions;
+            this.dimensions = options.dimensions !== undefined ? options.dimensions : 256;
+        }
+        this.embedFn = embedFn;
+        this.vectors = [];
+    }
+
+    async add(id, text, metadata = {}) {
+        if (!text || typeof text !== 'string') {
+            throw new Error('Text string is required for vector addition');
+        }
+        const callFn = typeof this.embedFn === 'function' ? this.embedFn : (this.embedFn?.call || this.embedFn?.fn);
+        if (typeof callFn !== 'function') {
+            throw new Error('VectorStore requires a valid embedFn function');
+        }
+
+        const rawVec = await callFn(text);
+        let vector = Array.isArray(rawVec) ? (Array.isArray(rawVec[0]) ? rawVec[0] : rawVec) : (rawVec?.embedding || []);
+        vector = processVectorDimensions(vector, this.dimensions);
+
+        const entry = {
+            id: id || `vec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            text,
+            vector,
+            metadata,
+            timestamp: new Date().toISOString()
+        };
+
+        this.vectors.push(entry);
+        return entry;
+    }
+
+    async saveVector(filePath, collectionName) {
+        return await this.saveVectors(filePath, collectionName);
+    }
+
+    async saveVectors(filePathInput, collectionName = this.name) {
+        if (!filePathInput) {
+            throw new Error('File path is required to save vectors');
+        }
+        const targetPath = path.resolve(process.cwd(), filePathInput);
+        const dir = path.dirname(targetPath);
+        if (!fs.existsSync(dir)) {
+            await fs.promises.mkdir(dir, { recursive: true });
+        }
+
+        const payload = {
+            name: collectionName || this.name,
+            dimensions: this.dimensions,
+            updatedAt: new Date().toISOString(),
+            total: this.vectors.length,
+            vectors: this.vectors
+        };
+
+        await fs.promises.writeFile(targetPath, JSON.stringify(payload, null, 2), 'utf8');
+        return targetPath;
+    }
+
+    async loadVectors(filePathInput) {
+        return await this.loadVector(filePathInput);
+    }
+
+    async loadVector(filePathInput) {
+        if (!filePathInput) {
+            throw new Error('File path is required to load vectors');
+        }
+        const targetPath = path.resolve(process.cwd(), filePathInput);
+        if (!fs.existsSync(targetPath)) {
+            throw new Error(`Vector file not found at path: ${targetPath}`);
+        }
+
+        const content = await fs.promises.readFile(targetPath, 'utf8');
+        const parsed = JSON.parse(content);
+
+        if (parsed && Array.isArray(parsed.vectors)) {
+            this.name = parsed.name || this.name;
+            this.dimensions = parsed.dimensions !== undefined ? parsed.dimensions : this.dimensions;
+            this.vectors = parsed.vectors;
+        }
+
+        return this.vectors;
+    }
+
+    async search(query, options = {}) {
+        const { limit = 3, minScore = 0.0 } = options;
+        if (!query || this.vectors.length === 0) return [];
+
+        const callFn = typeof this.embedFn === 'function' ? this.embedFn : (this.embedFn?.call || this.embedFn?.fn);
+        if (typeof callFn !== 'function') {
+            throw new Error('VectorStore requires a valid embedFn function');
+        }
+
+        const rawVec = await callFn(query);
+        let queryVec = Array.isArray(rawVec) ? (Array.isArray(rawVec[0]) ? rawVec[0] : rawVec) : (rawVec?.embedding || []);
+        queryVec = processVectorDimensions(queryVec, this.dimensions);
+
+        const scored = this.vectors.map(item => ({
+            id: item.id,
+            text: item.text,
+            metadata: item.metadata,
+            score: cosineSimilarity(queryVec, item.vector)
+        }));
+
+        return scored
+            .filter(item => item.score >= minScore)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit);
+    }
+}
+
+module.exports = { Embedding, VectorStore, retrieve, chunkText, cosineSimilarity };
