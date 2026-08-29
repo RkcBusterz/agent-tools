@@ -6,10 +6,12 @@ class McpKit {
         this.tools = new Map();
     }
 
-    add({ name, fn, category = 'general', parameters = {}, keywords = [], description = '' }) {
+    add({ name, fn, category = 'general', parameters = {}, keywords = [], description = '', key = [], keys = [] }) {
         if (!name || typeof fn !== 'function') {
             throw new Error('Tool name and function are required');
         }
+
+        const keyList = Array.isArray(key) && key.length > 0 ? key : (typeof key === 'string' ? [key] : (Array.isArray(keys) ? keys : []));
 
         const tool = {
             name,
@@ -17,7 +19,8 @@ class McpKit {
             category,
             parameters,
             keywords,
-            description
+            description,
+            key: keyList
         };
 
         this.tools.set(name, tool);
@@ -28,7 +31,7 @@ class McpKit {
         return this.tools.get(name);
     }
 
-    async execute(name, args) {
+    async execute(name, args, systemContext = {}) {
         let tool = this.tools.get(name);
         if (!tool && name.includes('.')) {
             const actualName = name.split('.').pop();
@@ -38,14 +41,23 @@ class McpKit {
             throw new Error(`Tool "${name}" not found`);
         }
 
-        try {
-            if (typeof args === 'object' && args !== null && !Array.isArray(args)) {
-                return await tool.fn(args);
+        let finalArgs = typeof args === 'object' && args !== null && !Array.isArray(args) ? { ...args } : {};
+
+        if (Array.isArray(tool.key)) {
+            for (const k of tool.key) {
+                if (systemContext && Object.prototype.hasOwnProperty.call(systemContext, k)) {
+                    finalArgs[k] = systemContext[k];
+                } else {
+                    delete finalArgs[k];
+                }
             }
+        }
+
+        try {
             if (Array.isArray(args)) {
                 return await tool.fn(...args);
             }
-            return await tool.fn(args);
+            return await tool.fn(finalArgs);
         } catch (err) {
             throw new Error(`Execution error in tool "${tool.name}": ${err.message}`);
         }
@@ -284,7 +296,7 @@ Task: ${userPrompt}`;
             if (parsed.requiresContext === false && history[0] && history[0].parts && history[0].parts[0]) {
                 history[0].parts[0].text = history[0].parts[0].text.replace(/\n\nCONVERSATION CONTEXT:[\s\S]*?(?=\n\nTask:)/, '');
             }
-            const action = parsed.action || (parsed.name ? 'execute' : null);
+            const action = (parsed.action && parsed.action.trim()) || (parsed.query ? 'search' : (parsed.name ? 'execute' : (parsed.category ? 'list_tools' : null)));
 
             if (action === 'answer') {
                 const finalAnswer = parsed.content || parsed.result || text;
@@ -318,7 +330,8 @@ Task: ${userPrompt}`;
                 } else if (action === 'execute' || kit.get(action) || kit.get(parsed.name)) {
                     const toolName = parsed.name || action;
                     const args = parsed.args !== undefined ? parsed.args : (parsed[""] !== undefined ? parsed[""] : {});
-                    const res = await kit.execute(toolName, args);
+                    const sysCtx = (typeof options === 'object' && (options.systemContext || options.key || options.keys || options.reservedArgs)) || {};
+                    const res = await kit.execute(toolName, args, sysCtx);
                     resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
                 } else {
                     await saveAssistantMessage(text);
