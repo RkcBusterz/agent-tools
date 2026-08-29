@@ -1,7 +1,7 @@
 const { MemoryContext, FileContext } = require('./context_manager.js');
 const { LlmRouter } = require('./router.js');
 
-class McpKit {
+class ToolKit {
     constructor() {
         this.tools = new Map();
     }
