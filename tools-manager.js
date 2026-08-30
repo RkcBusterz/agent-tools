@@ -31,7 +31,7 @@ class ToolKit {
         return this.tools.get(name);
     }
 
-    async execute(name, args, systemContext = {}) {
+    async execute(name, args, keys = {}) {
         let tool = this.tools.get(name);
         if (!tool && name.includes('.')) {
             const actualName = name.split('.').pop();
@@ -43,10 +43,12 @@ class ToolKit {
 
         let finalArgs = typeof args === 'object' && args !== null && !Array.isArray(args) ? { ...args } : {};
 
+        const keyCtx = (typeof keys === 'object' && keys !== null) ? (keys.keys || keys.key || keys) : {};
+
         if (Array.isArray(tool.key)) {
             for (const k of tool.key) {
-                if (systemContext && Object.prototype.hasOwnProperty.call(systemContext, k)) {
-                    finalArgs[k] = systemContext[k];
+                if (keyCtx && Object.prototype.hasOwnProperty.call(keyCtx, k)) {
+                    finalArgs[k] = keyCtx[k];
                 } else {
                     delete finalArgs[k];
                 }
@@ -330,7 +332,7 @@ Task: ${userPrompt}`;
                 } else if (action === 'execute' || kit.get(action) || kit.get(parsed.name)) {
                     const toolName = parsed.name || action;
                     const args = parsed.args !== undefined ? parsed.args : (parsed[""] !== undefined ? parsed[""] : {});
-                    const sysCtx = (typeof options === 'object' && (options.systemContext || options.key || options.keys || options.reservedArgs)) || {};
+                    const sysCtx = (typeof options === 'object' && (options.keys || options.key || options.systemContext || options.reservedArgs)) || {};
                     const res = await kit.execute(toolName, args, sysCtx);
                     resultText = `EXECUTION_RESULT: ${JSON.stringify(res)}`;
                 } else {
