@@ -66,10 +66,42 @@ class ToolKit {
     }
 
 
+    getToolMetadata(tool) {
+        if (!tool) return null;
+        const { fn, key, ...metadata } = tool;
+        let cleanParams = metadata.parameters;
+
+        if (cleanParams && typeof cleanParams === 'object' && Array.isArray(key) && key.length > 0) {
+            if (cleanParams.properties && typeof cleanParams.properties === 'object') {
+                const props = { ...cleanParams.properties };
+                for (const k of key) {
+                    delete props[k];
+                }
+                cleanParams = {
+                    ...cleanParams,
+                    properties: props
+                };
+                if (Array.isArray(cleanParams.required)) {
+                    cleanParams.required = cleanParams.required.filter(r => !key.includes(r));
+                }
+            } else if (!Array.isArray(cleanParams)) {
+                cleanParams = { ...cleanParams };
+                for (const k of key) {
+                    delete cleanParams[k];
+                }
+            }
+        }
+
+        return {
+            ...metadata,
+            parameters: cleanParams
+        };
+    }
+
     list(category) {
         const toolsArray = Array.from(this.tools.values());
         const filtered = category ? toolsArray.filter(t => t.category === category) : toolsArray;
-        return filtered.map(({ fn, ...metadata }) => metadata);
+        return filtered.map(t => this.getToolMetadata(t));
     }
 
     listCategoriesAI() {
@@ -82,6 +114,7 @@ class ToolKit {
         const filtered = category ? toolsArray.filter(t => t.category === category) : toolsArray;
         return filtered.map(t => `${t.category}.${t.name}`).join('\n');
     }
+
     search(query) {
         if (!query) {
             return null;
@@ -144,7 +177,7 @@ class ToolKit {
             return null;
         }
 
-        const { fn, ...metadata } = bestMatch;
+        const metadata = this.getToolMetadata(bestMatch);
         return { ...metadata, score: highestScore };
     }
 
