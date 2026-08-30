@@ -378,4 +378,4 @@ Task: ${userPrompt}`;
 };
 
 
-module.exports = { McpKit, prompt };
+module.exports = { ToolKit, McpKit: ToolKit, prompt };

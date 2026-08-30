@@ -1,0 +1,27 @@
+{
+  "name": "mcp-manager",
+  "version": "1.0.0",
+  "description": "LLM Router, RAG VectorStore, Context Management, and MCP Tool Execution Kit",
+  "main": "index.js",
+  "scripts": {
+    "test": "node ai_test.js"
+  },
+  "files": [
+    "index.js",
+    "router.js",
+    "context_manager.js",
+    "rag.js",
+    "tools-manager.js"
+  ],
+  "keywords": [
+    "mcp",
+    "llm",
+    "rag",
+    "vectorstore",
+    "router",
+    "tools"
+  ],
+  "author": "RkcBusterz",
+  "license": "ISC",
+  "dependencies": {}
+}
